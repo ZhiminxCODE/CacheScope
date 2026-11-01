@@ -1,0 +1,25 @@
+name: Linux checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and test C and Python
+        run: make test
+      - name: Build and test container
+        run: |
+          docker build --target test -t cachescope:test .
+          docker run --rm cachescope:test
+      - name: Exercise fio runner on native Linux storage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fio
+          python3 -m cachescope_runner prepare data --size 64MiB
+          python3 -m cachescope_runner validate data/sample.bin --output results/validation
+          python3 -m cachescope_runner benchmark data/sample.bin --repeats 1 --output results/benchmark
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: experiment-results
+          path: results/

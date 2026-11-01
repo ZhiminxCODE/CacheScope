@@ -1,0 +1,9 @@
+.git
+.DS_Store
+__pycache__
+**/__pycache__
+cachescope
+test-map
+data
+results
+*.dSYM

@@ -1,0 +1,7 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    labels:
+      cachescope-demo: "true"
+# Test data is created inside this node's Linux filesystem, avoiding a Mac bind mount.
