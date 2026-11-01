@@ -37,6 +37,16 @@ criteria leave room for readahead and report `inconclusive` when not met.
 
 `k8s-demo.json` records pod specs, nodes, file identities, hashes, every eviction
 attempt, before/after snapshots, reader activity, and observed/inconclusive status.
+It also saves the numeric criteria, a `measurements` object for each trial, and a
+`reason` explaining every outcome. Baseline percentages identify whether the sample,
+control, or observer missed the cold threshold. After-read percentages identify
+insufficient warming, excessive distant residency, or a control that warmed. A
+range with no whole comparison bins is explicitly inconclusive. For example:
+
+```text
+separate_inode_control: inconclusive — control started at 3.000% resident, above 1%
+```
+
 Exit 0 means both observations met the criteria, 2 means inconclusive, 1 an error.
 
 ## Manual live demo

@@ -61,3 +61,17 @@ the two maps, and a `delta_map`. Changed bins appear in `changes` with absolute
 `+`, `-`, and `.` symbols. Unchanged means the net bin count is the same, not that
 the same individual pages remained resident. Diff JSON is a comparison record,
 not an inspector snapshot and cannot itself be passed as a snapshot to `diff`.
+
+## Paired benchmark speedup
+
+`benchmark.json` contains a `paired_speedup` object, separate from the three trial
+summary rows. `qualifying_pairs` and `total_pairs` give the paired sample counts;
+`median_cold_to_warm_speedup` is null when none qualify. For every repeat with both
+buffered trials at status `ok` and finite positive `fio_elapsed_ms`, `pairs` records
+the repeat ID, `cold_elapsed_ms`, `warm_elapsed_ms`, and their
+`cold_to_warm_speedup` ratio. `excluded_pairs` records repeat IDs and reasons for
+missing, unqualified, or unresolved timings. `metric` and `definition` identify
+the elapsed-time basis. `pairs.csv` exports the qualifying per-repeat ratios.
+
+The median is computed from ratios of corresponding runs within a repeat.
+Independently computed trial medians remain available in `summary` for comparison.

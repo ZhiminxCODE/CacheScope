@@ -14,7 +14,7 @@
 #include "cache_map.h"
 #endif
 
-#define VERSION "1.1.0"
+#define VERSION "1.2.0"
 #define MAX_WIDTH 4096
 
 static void usage(FILE *out)
@@ -101,6 +101,65 @@ static void json_string(const char *s)
         }
     }
     putchar('"');
+}
+
+struct inspection_result {
+    const char *path;
+    struct stat metadata;
+    uid_t effective_uid;
+    bool verified;
+    uint64_t size, page_size, offset, length, pages, resident;
+    double percent;
+    const struct cache_bin *bins;
+    size_t bin_count;
+};
+
+static void print_json(const struct inspection_result *r)
+{
+    fputs("{\"schema_version\":1,\"file\":", stdout);
+    json_string(r->path);
+    printf(",\"size_bytes\":%" PRIu64 ",\"offset_bytes\":%" PRIu64
+           ",\"length_bytes\":%" PRIu64 ",\"page_size\":%" PRIu64
+           ",\"total_pages\":%" PRIu64 ",\"resident_pages\":%" PRIu64
+           ",\"resident_percent\":%.6f,\"owner_uid\":%ju,\"effective_uid\":%ju"
+           ",\"ownership_verified\":%s,\"device\":%ju,\"inode\":%ju,\"map\":\"",
+           r->size, r->offset, r->length, r->page_size, r->pages, r->resident, r->percent,
+           (uintmax_t)r->metadata.st_uid, (uintmax_t)r->effective_uid, r->verified ? "true" : "false",
+           (uintmax_t)r->metadata.st_dev, (uintmax_t)r->metadata.st_ino);
+    for (size_t i = 0; i < r->bin_count; ++i)
+        putchar(map_symbol(&r->bins[i]));
+    fputs("\",\"bins\":[", stdout);
+    for (size_t i = 0; i < r->bin_count; ++i) {
+        uint64_t relative_offset = r->bins[i].start_page * r->page_size;
+        uint64_t offset = r->offset + relative_offset;
+        uint64_t length = r->bins[i].page_count * r->page_size;
+        if (length > r->length - relative_offset)
+            length = r->length - relative_offset;
+        printf("%s{\"start_page\":%" PRIu64 ",\"page_count\":%" PRIu64
+               ",\"offset_bytes\":%" PRIu64 ",\"length_bytes\":%" PRIu64
+               ",\"resident_pages\":%" PRIu64 "}", i ? "," : "",
+               r->offset / r->page_size + r->bins[i].start_page, r->bins[i].page_count,
+               offset, length, r->bins[i].resident_pages);
+    }
+    fputs("]}\n", stdout);
+}
+
+static void print_text(const struct inspection_result *r, bool show_range)
+{
+    printf("File         %s\nSize         %" PRIu64 " bytes (%.2f MiB)\n"
+           "Page size    %" PRIu64 " bytes\nResident     %" PRIu64 " of %" PRIu64
+           " pages (%.1f%%)\nVisibility   %s\n",
+           r->path, r->size, (double)r->size / 1048576.0, r->page_size, r->resident, r->pages,
+           r->percent, r->verified ? "owner verified" : "UNVERIFIED");
+    if (show_range)
+        printf("Range        [%" PRIu64 ", %" PRIu64 ") bytes\n", r->offset, r->offset + r->length);
+    printf("\nFile offset  %.2f — %.2f MiB\nCache map    ",
+           (double)r->offset / 1048576.0, (double)(r->offset + r->length) / 1048576.0);
+    for (size_t i = 0; i < r->bin_count; ++i)
+        putchar(map_symbol(&r->bins[i]));
+    if (!r->bin_count)
+        fputs("(empty)", stdout);
+    fputs("\n             . none  + partial  # all\n", stdout);
 }
 
 static int inspect(const char *path, bool json, size_t width, bool allow_unverified,
@@ -206,51 +265,17 @@ static int inspect(const char *path, bool json, size_t width, bool allow_unverif
         fputs("cachescope: file changed during inspection; retry on a quiescent file\n", stderr);
         goto done;
     }
-    double percent = pages ? 100.0 * (double)resident / (double)pages : 0.0;
-    if (json) {
-        fputs("{\"schema_version\":1,\"file\":", stdout);
-        json_string(path);
-        printf(",\"size_bytes\":%" PRIu64 ",\"offset_bytes\":%" PRIu64
-               ",\"length_bytes\":%" PRIu64 ",\"page_size\":%" PRIu64
-               ",\"total_pages\":%" PRIu64 ",\"resident_pages\":%" PRIu64
-               ",\"resident_percent\":%.6f,\"owner_uid\":%ju,\"effective_uid\":%ju"
-               ",\"ownership_verified\":%s,\"device\":%ju,\"inode\":%ju,\"map\":\"",
-               size, range_offset, range_length, page_size, pages, resident, percent, (uintmax_t)before.st_uid,
-               (uintmax_t)geteuid(), verified ? "true" : "false",
-               (uintmax_t)before.st_dev, (uintmax_t)before.st_ino);
-        for (size_t i = 0; i < count; ++i)
-            putchar(map_symbol(&bins[i]));
-        fputs("\",\"bins\":[", stdout);
-        for (size_t i = 0; i < count; ++i) {
-            uint64_t relative_offset = bins[i].start_page * page_size;
-            uint64_t offset = range_offset + relative_offset;
-            uint64_t length = bins[i].page_count * page_size;
-            if (length > range_length - relative_offset)
-                length = range_length - relative_offset;
-            printf("%s{\"start_page\":%" PRIu64 ",\"page_count\":%" PRIu64
-                   ",\"offset_bytes\":%" PRIu64 ",\"length_bytes\":%" PRIu64
-                   ",\"resident_pages\":%" PRIu64 "}", i ? "," : "",
-                   range_offset / page_size + bins[i].start_page, bins[i].page_count, offset, length,
-                   bins[i].resident_pages);
-        }
-        fputs("]}\n", stdout);
-    } else {
-        printf("File         %s\nSize         %" PRIu64 " bytes (%.2f MiB)\n"
-               "Page size    %" PRIu64 " bytes\nResident     %" PRIu64 " of %" PRIu64
-               " pages (%.1f%%)\nVisibility   %s\n",
-               path, size, (double)size / 1048576.0, page_size, resident, pages,
-               percent, verified ? "owner verified" : "UNVERIFIED");
-        if (range_offset || has_length)
-            printf("Range        [%" PRIu64 ", %" PRIu64 ") bytes\n", range_offset,
-                   range_offset + range_length);
-        printf("\nFile offset  %.2f — %.2f MiB\nCache map    ",
-               (double)range_offset / 1048576.0, (double)(range_offset + range_length) / 1048576.0);
-        for (size_t i = 0; i < count; ++i)
-            putchar(map_symbol(&bins[i]));
-        if (!count)
-            fputs("(empty)", stdout);
-        fputs("\n             . none  + partial  # all\n", stdout);
-    }
+    struct inspection_result result = {
+        .path = path, .metadata = before, .effective_uid = geteuid(), .verified = verified,
+        .size = size, .page_size = page_size, .offset = range_offset, .length = range_length,
+        .pages = pages, .resident = resident,
+        .percent = pages ? 100.0 * (double)resident / (double)pages : 0.0,
+        .bins = bins, .bin_count = count,
+    };
+    if (json)
+        print_json(&result);
+    else
+        print_text(&result, range_offset || has_length);
     rc = 0;
 done:
     free(vec);

@@ -1,0 +1,32 @@
+{
+  "source": "Actual local Docker Linux VM spatial validation; no residency values synthesized.",
+  "source_validation_sha256": "4c21771b2ec9db3c70c958cd24226c14545430ff3ab441ad8abdb2f6ff6994a3",
+  "run_started_at_utc": "2026-11-01T21:09:08.752734+00:00",
+  "kernel": "6.12.54-linuxkit",
+  "architecture": "aarch64",
+  "file_size_bytes": 268435456,
+  "page_size": 4096,
+  "binning": "Adjacent pairs of the original 64 bins were summed into 32 bins; totals and offsets preserved.",
+  "trials": [
+    {
+      "snapshot": "after.json",
+      "requested_range": {
+        "offset_bytes": 0,
+        "length_bytes": 134217728,
+        "wall_elapsed_ms": 76.62412499485072
+      },
+      "baseline_resident_percent": 0.0,
+      "after_resident_percent": 50.390625
+    },
+    {
+      "snapshot": "middle.json",
+      "requested_range": {
+        "offset_bytes": 67108864,
+        "length_bytes": 134217728,
+        "wall_elapsed_ms": 56.55504199967254
+      },
+      "baseline_resident_percent": 0.0,
+      "after_resident_percent": 50.390625
+    }
+  ]
+}

@@ -27,6 +27,19 @@ def snapshot(resident=(0, 0, 0, 0), pages_per_bin=4, offset=0, inode=10):
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_published_examples_replay_and_show_equal_percent_different_regions(self):
+        root = Path(__file__).resolve().parent.parent / "examples"
+        before, first, middle = [json.loads((root / name).read_text())
+                                 for name in ("before.json", "after.json", "middle.json")]
+        warmed = compare_snapshots(before, first)
+        moved = compare_snapshots(first, middle)
+        self.assertGreater(warmed["net_resident_pages"], 0)
+        self.assertEqual(moved["net_resident_pages"], 0)
+        self.assertEqual(first["resident_percent"], middle["resident_percent"])
+        self.assertNotEqual(first["map"], middle["map"])
+        self.assertGreater(moved["warmer_bins"], 0)
+        self.assertGreater(moved["cooler_bins"], 0)
+
     def test_diff_detects_regions_even_when_total_residency_is_unchanged(self):
         result = compare_snapshots(snapshot((0, 4, 2, 0)), snapshot((4, 0, 2, 0)))
         self.assertEqual(result["net_resident_pages"], 0)

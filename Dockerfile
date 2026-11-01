@@ -23,6 +23,7 @@ CMD ["--help"]
 FROM runtime AS test
 USER root
 COPY tests/ /opt/cachescope/tests/
+COPY examples/ /opt/cachescope/examples/
 WORKDIR /opt/cachescope
 CMD ["python3", "tests/run.py"]
 ENTRYPOINT []

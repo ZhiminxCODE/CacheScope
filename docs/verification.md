@@ -104,3 +104,34 @@ Raw recordings, diff JSON, zoom JSON, spatial validation, and fio outputs are
 retained locally in `results/feature-verification/`. The new recording files are
 compatible with the offline diff command. Snapshot comparisons also accept the
 original full-file schema without range fields. Results remain gitignored.
+
+## Version 1.2 review improvements
+
+Selected spatial snapshots are now published in [examples/](../examples/README.md)
+with provenance and 32-column maps. They preserve the original residency totals:
+the first-half and middle-half reads each left exactly 50.390625% cached at
+different offsets. Both offline replay commands were exercised on macOS.
+
+The complete Linux test run passed **32 unit tests, 8 integration tests, and the C
+map checks**, including the full ownership assertions on this host. A separate run
+with the container's `CHOWN` capability removed correctly skipped the ownership
+fixture with an explicit permission reason. Unit coverage also exercises a
+single-UID mapping and a narrow mapping whose alternate ID is 1 rather than 12345.
+
+Five final cold/warm pairs all qualified. Their per-repeat elapsed-time ratios
+were approximately 8.105, 3.578, 3.603, 1.243, and 2.569, with a paired median of
+**3.578×**. All 15 fio trials qualified. Individual ratios and exclusions are now
+available in `pairs.csv` and `benchmark.json`; the aggregate trial medians remain
+available separately. These short VM measurements vary considerably and support
+an observation about this run rather than a general performance guarantee.
+
+Both Kubernetes observations passed again. The saved reports contain the actual
+baseline and after-read percentages, numeric criteria, and outcome reasons.
+Unit tests exercise failed baselines, inadequate requested-region warmth,
+excessive distant residency, a warming control, and missing whole bins.
+
+The final benchmark was collected after cluster startup completed. An earlier
+validation run performed during startup is retained separately. Local raw output
+is under `results/review-improvements/docker/`, `initial-docker/`, and `kubernetes/`.
+Temporary review containers and the dedicated kind cluster were removed afterward;
+the existing interactive demo container was left intact.

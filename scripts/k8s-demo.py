@@ -7,7 +7,11 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cachescope_runner.cli import output_directory, region_percent, save_json
+from cachescope_runner.cli import output_directory, save_json
+from cachescope_runner.observations import (
+    COLD_MAX_PERCENT, DISTANT_MAX_PERCENT, REQUESTED_MIN_PERCENT,
+    assess_baselines, assess_observation,
+)
 
 
 def main():
@@ -36,16 +40,19 @@ def main():
         for _ in range(3):
             execute("reader-a", "python3", "-m", "cachescope_runner", "evict", file)
             snapshots.append(inspect("observer-b", file))
-            if snapshots[-1]["resident_percent"] <= 1:
-                return snapshots, True
-        return snapshots, False
+            if snapshots[-1]["resident_percent"] <= COLD_MAX_PERCENT:
+                break
+        return snapshots
 
     output = output_directory(args.output, "k8s")
     pods = json.loads(run("get", "pods", "reader-a", "observer-b", "-o", "json"))
     nodes = {p["spec"]["nodeName"] for p in pods["items"]}
     if len(nodes) != 1:
         raise RuntimeError("both pods must be on the same node")
-    report = {"schema_version": 1, "context": args.context, "pods": pods, "trials": []}
+    report = {"schema_version": 1, "context": args.context, "pods": pods, "trials": [],
+              "criteria": {"cold_max_percent": COLD_MAX_PERCENT,
+                           "requested_region_min_percent": REQUESTED_MIN_PERCENT,
+                           "distant_region_max_percent": DISTANT_MAX_PERCENT}}
     sample, control = "/data/sample.bin", "/data/control.bin"
     a = inspect("reader-a", sample)
     b = inspect("observer-b", sample)
@@ -67,27 +74,23 @@ def main():
         raise RuntimeError("file is too small for a half-file read")
     for name, observed_file in [("shared_file", sample), ("separate_inode_control", control)]:
         # Always reset both, including the file A will read during the control.
-        sample_attempts, sample_cold = cold(sample)
-        control_attempts, control_cold = cold(control)
+        sample_attempts = cold(sample)
+        control_attempts = cold(control)
         before = inspect("observer-b", observed_file)
-        trial = {"name": name, "before": before, "status": "inconclusive",
+        baseline = assess_baselines(sample_attempts[-1], control_attempts[-1], before)
+        trial = {"name": name, "before": before, **baseline,
                  "sample_eviction_attempts": sample_attempts,
                  "control_eviction_attempts": control_attempts}
         report["trials"].append(trial)
-        if sample_cold and control_cold and before["resident_percent"] <= 1:
+        if trial["status"] == "ready":
             trial["reader"] = json.loads(execute("reader-a", "python3", "-m", "cachescope_runner",
                                                   "read-range", sample, "--length", str(half)))
             trial["after"] = after = inspect("observer-b", observed_file)
             trial["reader_after"] = reader_after = inspect("reader-a", sample)
-            heated = region_percent(reader_after, 0, half)
-            if name == "shared_file":
-                inside = region_percent(after, 0, half)
-                distant = region_percent(after, b["size_bytes"] * 3 // 4, b["size_bytes"])
-                observed = inside is not None and distant is not None and inside >= 90 and distant <= 10
-            else:
-                observed = heated is not None and heated >= 90 and after["resident_percent"] <= 1
-            trial["status"] = "observed" if observed else "inconclusive"
-        print(f"{name}: {trial['status']}")
+            decision = assess_observation(name, reader_after, after, b["size_bytes"], half)
+            trial["measurements"].update(decision["measurements"])
+            trial.update(status=decision["status"], reason=decision["reason"])
+        print(f"{name}: {trial['status']} — {trial['reason']}")
         print(f"  before {before['map']}")
         if "after" in trial:
             print(f"  after  {trial['after']['map']}")

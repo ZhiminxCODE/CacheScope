@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cachescope_runner.cli import cold_baseline, read_range, region_percent
+from ownership_fixture import change_to_mapped_owner
 
 BIN = os.environ.get("CACHESCOPE_BIN", "cachescope")
 
@@ -130,10 +131,10 @@ class InspectorTests(unittest.TestCase):
             process.communicate(timeout=5)
 
     def test_ownership_masking_is_not_silently_reported(self):
-        if os.geteuid() != 0:
-            self.skipTest("requires root to create a differently owned fixture")
         self.path.write_bytes(b"x")
-        os.chown(self.path, 12345, 12345)
+        self.path.chmod(0o644)
+        uid, _gid = change_to_mapped_owner(self.path)
+        self.assertEqual(self.path.stat().st_uid, uid)
         self.assertEqual(self.command("inspect", self.path).returncode, 1)
         result = self.command("inspect", "--json", "--allow-unverified", self.path)
         self.assertEqual(result.returncode, 0, result.stderr)

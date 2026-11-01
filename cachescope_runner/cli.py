@@ -340,13 +340,48 @@ def summarize(runs):
     return summary
 
 
+def paired_speedup(runs):
+    """Pair qualified cold/warm timings by repeat, then take the median ratio."""
+    grouped = {}
+    for run in runs:
+        if run["trial"] in ("first_buffered", "second_buffered"):
+            grouped.setdefault(run["repeat"], {}).setdefault(run["trial"], []).append(run)
+    pairs, excluded = [], []
+    for repeat, trials in sorted(grouped.items()):
+        cold = trials.get("first_buffered", [])
+        warm = trials.get("second_buffered", [])
+        reason = None
+        if len(cold) != 1 or len(warm) != 1:
+            reason = "requires exactly one first and second buffered trial in this repeat"
+        elif cold[0]["status"] != "ok" or warm[0]["status"] != "ok":
+            reason = f"unqualified trials: first={cold[0]['status']}, second={warm[0]['status']}"
+        else:
+            cold_ms, warm_ms = cold[0].get("fio_elapsed_ms"), warm[0].get("fio_elapsed_ms")
+            if not all(type(t) in (int, float) and math.isfinite(t) and t > 0 for t in (cold_ms, warm_ms)):
+                reason = "both fio elapsed times must be finite and positive; zero ms has insufficient resolution"
+        if reason:
+            excluded.append({"repeat": repeat, "reason": reason})
+        else:
+            pairs.append({"repeat": repeat, "cold_elapsed_ms": cold_ms, "warm_elapsed_ms": warm_ms,
+                          "cold_to_warm_speedup": cold_ms / warm_ms})
+    return {"metric": "fio_elapsed_ms", "definition": "first_buffered / second_buffered within each repeat",
+            "qualifying_pairs": len(pairs), "total_pairs": len(grouped),
+            "median_cold_to_warm_speedup": statistics.median(p["cold_to_warm_speedup"] for p in pairs) if pairs else None,
+            "pairs": pairs, "excluded_pairs": excluded}
+
+
 def write_benchmark_report(output, report):
     report["summary"] = summarize(report["runs"])
+    report["paired_speedup"] = speedup = paired_speedup(report["runs"])
     save_json(output / "benchmark.json", report)
     with (output / "summary.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(report["summary"][0]))
         writer.writeheader()
         writer.writerows(report["summary"])
+    with (output / "pairs.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("repeat", "cold_elapsed_ms", "warm_elapsed_ms", "cold_to_warm_speedup"))
+        writer.writeheader()
+        writer.writerows(speedup["pairs"])
     lines = ["# CacheScope measurements", "", "Medians include only verified trials with status `ok`.", "",
              "| Trial | Valid / total | Before % | After % | MiB/s | fio ms | clat µs | total lat µs |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
@@ -357,7 +392,14 @@ def write_benchmark_report(output, report):
                   "bandwidth_mib_s", "fio_elapsed_ms", "clat_mean_us", "lat_mean_us")]
         lines.append(f"| {row['trial']} | {row['valid_runs']} / {row['total_runs']} | " +
                      " | ".join(fmt(v) for v in values) + " |")
-    lines += ["", "See `benchmark.json` for every snapshot, eviction attempt, command, and status.",
+    median = speedup["median_cold_to_warm_speedup"]
+    formatted_speedup = "unavailable" if median is None else f"{median:.3f}×"
+    lines += ["", f"**Paired cold-to-warm speedup: {formatted_speedup} "
+              f"({speedup['qualifying_pairs']}/{speedup['total_pairs']} qualifying pairs).**",
+              "Median of first/second fio elapsed-time ratios within the same repeat; "
+              "not a ratio of separately computed medians. Nonpositive or nonfinite times are excluded.",
+              "See `pairs.csv` for individual ratios and `benchmark.json` for exclusion reasons.", "",
+              "See `benchmark.json` for every snapshot, eviction attempt, command, and status.",
               "Raw fio JSON and stderr are saved separately for every executed job.", ""]
     (output / "summary.md").write_text("\n".join(lines))
 

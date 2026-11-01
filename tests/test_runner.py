@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cachescope_runner.cli import (
     ExperimentError, cold_baseline, fio_command, fio_metrics, percentage, prepare,
-    read_range, region_percent, run_fio, size_arg, summarize,
+    paired_speedup, read_range, region_percent, run_fio, size_arg, summarize, write_benchmark_report,
 )
 
 
@@ -114,6 +114,47 @@ class RunnerTests(unittest.TestCase):
             {"offset_bytes": 8192, "length_bytes": 8192, "page_count": 2, "resident_pages": 2}]}
         self.assertEqual(region_percent(snapshot, 8192, 16384), 100)
         self.assertIsNone(region_percent(snapshot, 4096, 8192))
+
+    def test_paired_speedup_uses_median_of_ratios_within_repeats(self):
+        runs = []
+        for repeat, cold, warm in ((1, 100, 10), (2, 100, 50), (3, 1000, 100)):
+            for trial, elapsed in (("first_buffered", cold), ("second_buffered", warm)):
+                runs.append({"repeat": repeat, "trial": trial, "status": "ok", "fio_elapsed_ms": elapsed})
+        result = paired_speedup(list(reversed(runs)))
+        self.assertEqual(result["median_cold_to_warm_speedup"], 10)
+        self.assertEqual([p["cold_to_warm_speedup"] for p in result["pairs"]], [10, 2, 10])
+        self.assertEqual(result["qualifying_pairs"], 3)
+        self.assertEqual(result["total_pairs"], 3)
+
+    def test_unqualified_incomplete_and_unresolved_pairs_are_excluded(self):
+        runs = []
+        for repeat, cold, warm, status in ((1, 10, 0, "ok"), (2, 10, 2, "inconclusive"),
+                                           (3, float("nan"), 2, "ok"), (4, 0, 2, "ok")):
+            runs.extend([{"repeat": repeat, "trial": "first_buffered", "status": "ok", "fio_elapsed_ms": cold},
+                         {"repeat": repeat, "trial": "second_buffered", "status": status, "fio_elapsed_ms": warm}])
+        runs.append({"repeat": 5, "trial": "first_buffered", "status": "ok", "fio_elapsed_ms": 10})
+        result = paired_speedup(runs)
+        self.assertEqual(result["qualifying_pairs"], 0)
+        self.assertEqual(result["total_pairs"], 5)
+        self.assertIsNone(result["median_cold_to_warm_speedup"])
+        self.assertEqual(len(result["excluded_pairs"]), 5)
+        self.assertTrue(all(p["reason"] for p in result["excluded_pairs"]))
+
+    def test_paired_speedup_is_saved_in_json_csv_and_markdown(self):
+        runs = []
+        for trial, elapsed in (("first_buffered", 90), ("second_buffered", 30)):
+            runs.append({"repeat": 1, "trial": trial, "status": "ok", "fio_elapsed_ms": elapsed,
+                         "wall_elapsed_ms": elapsed + 200, "bandwidth_mib_s": 1,
+                         "clat_mean_us": 2, "lat_mean_us": 3,
+                         "before": {"resident_percent": 0 if trial == "first_buffered" else 100},
+                         "after": {"resident_percent": 100}})
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_benchmark_report(output, {"runs": runs})
+            report = json.loads((output / "benchmark.json").read_text())
+            self.assertEqual(report["paired_speedup"]["median_cold_to_warm_speedup"], 3)
+            self.assertIn("3.000× (1/1 qualifying pairs)", (output / "summary.md").read_text())
+            self.assertIn("1,90,30,3.0", (output / "pairs.csv").read_text())
 
     def test_direct_unsupported_is_preserved_and_other_failures_are_errors(self):
         from subprocess import CompletedProcess

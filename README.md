@@ -7,32 +7,41 @@ dependency-free Python experiment runner, and a reproducible Docker / Kubernetes
 demo. The inspector maps a file without reading its contents. The experiment runner
 connects residency snapshots with fio measurements.
 
-Version 1.1 adds a live terminal view, zooming into file ranges, and saved-snapshot
-comparisons that show which regions warmed or cooled.
+A faster second read may start with most of the file already in RAM. CacheScope
+records that starting condition alongside the timing, helping you assess whether
+a program change deserves credit for a speedup. It includes a live terminal view,
+range zoom, and saved-snapshot comparisons.
+
+**Try a recorded experiment now, on macOS or Linux with Python 3.9+:**
+
+```sh
+python3 -m cachescope_runner diff examples/before.json examples/after.json
+python3 -m cachescope_runner diff examples/after.json examples/middle.json
+```
+
+No Docker, data file, or C build is needed for this replay. The second command
+shows why location matters: these actual measurements of a 256 MiB file ended
+with exactly the same cached percentage and different cached regions.
+
+| Requested buffered read | Resident afterward | Cache map (0 → 256 MiB) |
+|---|---:|---|
+| [0, 128) MiB | 50.390625% | `################+...............` |
+| [64, 192) MiB, following a new cold baseline | 50.390625% | `........################+.......` |
+
+Both baselines were 0%. Each trial left 129 MiB resident, including 1 MiB beyond
+the requested range, consistent with Linux readahead in this environment.
+`.` means uncached, `+` partially resident, and `#` fully resident within a bin.
+The requested ranges come from the experiment log: **a cache snapshot alone cannot
+prove exactly which bytes an application requested or which process populated
+them.** See [example provenance and reproduction](examples/README.md).
 
 The main experiment asks: **if pod A reads half a file, can pod B observe which half?**
 The demo compares a shared file with an independently written, byte-identical file
 on a separate inode. It saves evidence for both cases.
 
-```text
-$ cachescope inspect /data/sample.bin --width 32
-File         /data/sample.bin
-Size         268435456 bytes (256.00 MiB)
-Page size    4096 bytes
-Resident     32768 of 65536 pages (50.0%)
-Visibility   owner verified
-
-File offset  0 — 256.00 MiB
-Cache map    ################................
-             . none  + partial  # all
-```
-
-This is an **illustration**, not a promised measurement. Readahead, memory pressure,
-filesystem behavior, and concurrent access can change the result. Real measurements
-come from the commands below; no benchmark numbers are invented.
-
 [Collected local results and verification](docs/verification.md) include a real
-five-repeat fio sequence and both Kubernetes observations.
+five-repeat fio sequence and both Kubernetes observations. Readahead, memory
+pressure, filesystem behavior, and concurrent access can change new results.
 
 ## Build and inspect on Linux
 
@@ -191,6 +200,7 @@ Outputs:
 |---|---|
 | `benchmark.json` | Environment, settings, every snapshot and eviction attempt, raw measurements, statuses, medians |
 | `summary.md` / `summary.csv` | Median before/after residency, MiB/s, elapsed milliseconds, completion and total latency |
+| `pairs.csv` | Qualified repeat IDs, cold/warm fio elapsed times, and each cold-to-warm speedup ratio |
 | `NN-TRIAL.fio.json` | Original fio JSON for each executed job |
 | `NN-TRIAL.fio.stderr.txt` | fio diagnostics, including unsupported direct I/O |
 
@@ -202,6 +212,15 @@ process startup and fio setup can dominate short jobs. fio completion latency
 synchronous engines; both are retained. Direct I/O is tested on the actual
 filesystem. Unsupported errors are recorded, never silently replaced by buffered
 I/O. Other job failures remain errors.
+
+The Markdown report also shows **paired cold-to-warm speedup** and its qualifying
+pair count. For each repeat where both buffered trials qualified, divide the first
+fio elapsed time by the second, then take the median of those per-repeat ratios.
+For example, 90 ms / 30 ms is 3×. Both times must be finite and positive; a zero-ms
+measurement has insufficient timer resolution for a ratio. Every included pair
+and each exclusion reason is retained under `paired_speedup` in `benchmark.json`.
+This describes rereading under measured cache conditions; it does not establish
+that a code change caused a speedup.
 
 Output directories must be new to preserve previous results. Omit `--output` for
 a timestamped directory. Exit codes for runner experiments: 0 = all trials qualify,
@@ -321,6 +340,10 @@ argument errors; nonregular files; ownership masking; non-perturbing inspection;
 and first/middle range placement. Cache-dependent tests explicitly skip when
 eviction cannot be verified. The Docker test stage runs as root to exercise the
 ownership fixture; production runs as UID 1000. CI also runs a real fio sequence.
+The ownership fixture selects IDs from the process's UID/GID mappings and reports
+a clear skip when no alternate UID is mapped or changing ownership is unavailable.
+The full ownership assertions still run where supported. See Linux's
+[user-namespace mappings](https://man7.org/linux/man-pages/man7/user_namespaces.7.html).
 
 AWS is optional. [docs/aws.md](docs/aws.md) describes reproducing the same experiment
 on EC2 / EBS without provisioning infrastructure or making up cloud results.
