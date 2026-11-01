@@ -14,18 +14,45 @@
 #include "cache_map.h"
 #endif
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 #define MAX_WIDTH 4096
 
 static void usage(FILE *out)
 {
     fputs("CacheScope " VERSION " — Linux file-cache profiler\n"
           "Usage: cachescope inspect [--json] [--width N] [--allow-unverified] [--] FILE\n"
+          "                          [--offset SIZE] [--length SIZE]\n"
           "       cachescope --help | --version\n\n"
           "Queries mmap/mincore without reading file contents.\n"
           "Map: . no pages resident, + some resident, # all resident.\n"
           "Width defaults to 64 (1–4096); short files use one bin per page.\n"
+          "Zoom with a page-aligned offset and optional positive length.\n"
+          "Sizes accept bytes, KiB, MiB, or GiB; a range must fit inside the file.\n"
           "File ownership is required unless --allow-unverified is explicit.\n", out);
+}
+
+static bool parse_size(const char *value, uint64_t *result)
+{
+    if (*value < '0' || *value > '9')
+        return false;
+    char *end;
+    errno = 0;
+    uintmax_t number = strtoumax(value, &end, 10);
+    uint64_t multiplier;
+    if (!*end || !strcmp(end, "B"))
+        multiplier = 1;
+    else if (!strcmp(end, "KiB"))
+        multiplier = 1024;
+    else if (!strcmp(end, "MiB"))
+        multiplier = 1024 * 1024;
+    else if (!strcmp(end, "GiB"))
+        multiplier = 1024ULL * 1024 * 1024;
+    else
+        return false;
+    if (errno || number > UINT64_MAX / multiplier)
+        return false;
+    *result = (uint64_t)number * multiplier;
+    return true;
 }
 
 #ifdef __linux__
@@ -76,7 +103,8 @@ static void json_string(const char *s)
     putchar('"');
 }
 
-static int inspect(const char *path, bool json, size_t width, bool allow_unverified)
+static int inspect(const char *path, bool json, size_t width, bool allow_unverified,
+                   uint64_t range_offset, uint64_t range_length, bool has_length)
 {
     int rc = 1;
     /* O_NONBLOCK prevents a named pipe from hanging before fstat rejects it. */
@@ -113,7 +141,15 @@ static int inspect(const char *path, bool json, size_t width, bool allow_unverif
     }
     uint64_t page_size = (uint64_t)system_page_size;
     uint64_t size = (uint64_t)before.st_size;
-    uint64_t pages = size / page_size + (size % page_size != 0);
+    if (range_offset % page_size || range_offset > size ||
+        (has_length && range_length > size - range_offset)) {
+        fprintf(stderr, "cachescope: range must fit inside the file and offset must "
+                "be a multiple of %" PRIu64 " bytes\n", page_size);
+        goto done;
+    }
+    if (!has_length)
+        range_length = size - range_offset;
+    uint64_t pages = range_length / page_size + (range_length % page_size != 0);
     bins = calloc(width, sizeof(*bins));
     /* Bound working memory and virtual mappings, even for multi-terabyte files. */
     size_t chunk_pages = (size_t)((64ULL * 1024 * 1024) / page_size);
@@ -128,8 +164,8 @@ static int inspect(const char *path, bool json, size_t width, bool allow_unverif
     uint64_t resident = 0;
     for (uint64_t first = 0; first < pages;) {
         size_t n = pages - first < chunk_pages ? (size_t)(pages - first) : chunk_pages;
-        uint64_t offset = first * page_size;
-        uint64_t remaining = size - offset;
+        uint64_t offset = range_offset + first * page_size;
+        uint64_t remaining = range_length - first * page_size;
         size_t length = remaining < (uint64_t)n * page_size ?
             (size_t)remaining : n * (size_t)page_size;
         void *mapping = mmap(NULL, length, PROT_READ, MAP_SHARED, fd, (off_t)offset);
@@ -174,34 +210,41 @@ static int inspect(const char *path, bool json, size_t width, bool allow_unverif
     if (json) {
         fputs("{\"schema_version\":1,\"file\":", stdout);
         json_string(path);
-        printf(",\"size_bytes\":%" PRIu64 ",\"page_size\":%" PRIu64
+        printf(",\"size_bytes\":%" PRIu64 ",\"offset_bytes\":%" PRIu64
+               ",\"length_bytes\":%" PRIu64 ",\"page_size\":%" PRIu64
                ",\"total_pages\":%" PRIu64 ",\"resident_pages\":%" PRIu64
                ",\"resident_percent\":%.6f,\"owner_uid\":%ju,\"effective_uid\":%ju"
                ",\"ownership_verified\":%s,\"device\":%ju,\"inode\":%ju,\"map\":\"",
-               size, page_size, pages, resident, percent, (uintmax_t)before.st_uid,
+               size, range_offset, range_length, page_size, pages, resident, percent, (uintmax_t)before.st_uid,
                (uintmax_t)geteuid(), verified ? "true" : "false",
                (uintmax_t)before.st_dev, (uintmax_t)before.st_ino);
         for (size_t i = 0; i < count; ++i)
             putchar(map_symbol(&bins[i]));
         fputs("\",\"bins\":[", stdout);
         for (size_t i = 0; i < count; ++i) {
-            uint64_t offset = bins[i].start_page * page_size;
+            uint64_t relative_offset = bins[i].start_page * page_size;
+            uint64_t offset = range_offset + relative_offset;
             uint64_t length = bins[i].page_count * page_size;
-            if (length > size - offset)
-                length = size - offset;
+            if (length > range_length - relative_offset)
+                length = range_length - relative_offset;
             printf("%s{\"start_page\":%" PRIu64 ",\"page_count\":%" PRIu64
                    ",\"offset_bytes\":%" PRIu64 ",\"length_bytes\":%" PRIu64
                    ",\"resident_pages\":%" PRIu64 "}", i ? "," : "",
-                   bins[i].start_page, bins[i].page_count, offset, length,
+                   range_offset / page_size + bins[i].start_page, bins[i].page_count, offset, length,
                    bins[i].resident_pages);
         }
         fputs("]}\n", stdout);
     } else {
         printf("File         %s\nSize         %" PRIu64 " bytes (%.2f MiB)\n"
                "Page size    %" PRIu64 " bytes\nResident     %" PRIu64 " of %" PRIu64
-               " pages (%.1f%%)\nVisibility   %s\n\nFile offset  0 — %.2f MiB\nCache map    ",
+               " pages (%.1f%%)\nVisibility   %s\n",
                path, size, (double)size / 1048576.0, page_size, resident, pages,
-               percent, verified ? "owner verified" : "UNVERIFIED", (double)size / 1048576.0);
+               percent, verified ? "owner verified" : "UNVERIFIED");
+        if (range_offset || has_length)
+            printf("Range        [%" PRIu64 ", %" PRIu64 ") bytes\n", range_offset,
+                   range_offset + range_length);
+        printf("\nFile offset  %.2f — %.2f MiB\nCache map    ",
+               (double)range_offset / 1048576.0, (double)(range_offset + range_length) / 1048576.0);
         for (size_t i = 0; i < count; ++i)
             putchar(map_symbol(&bins[i]));
         if (!count)
@@ -240,12 +283,30 @@ int main(int argc, char **argv)
     }
     bool json = false, allow_unverified = false, options = true;
     size_t width = 64;
+    uint64_t offset = 0, length = 0;
+    bool has_length = false;
     const char *path = NULL;
     for (int i = 2; i < argc; ++i) {
         if (options && !strcmp(argv[i], "--")) {
             options = false;
         } else if (options && !strcmp(argv[i], "--json")) {
             json = true;
+        } else if (options && (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))) {
+            usage(stdout);
+            return 0;
+        } else if (options && (!strcmp(argv[i], "--offset") || !strcmp(argv[i], "--length"))) {
+            bool is_length = !strcmp(argv[i], "--length");
+            uint64_t parsed;
+            if (++i == argc || !parse_size(argv[i], &parsed) || (is_length && !parsed)) {
+                fputs("cachescope: range sizes require bytes or KiB/MiB/GiB; length must be positive\n", stderr);
+                return 2;
+            }
+            if (is_length) {
+                length = parsed;
+                has_length = true;
+            } else {
+                offset = parsed;
+            }
         } else if (options && !strcmp(argv[i], "--allow-unverified")) {
             allow_unverified = true;
         } else if (options && !strcmp(argv[i], "--width")) {
@@ -277,11 +338,14 @@ int main(int argc, char **argv)
         return 2;
     }
 #ifdef __linux__
-    return inspect(path, json, width, allow_unverified);
+    return inspect(path, json, width, allow_unverified, offset, length, has_length);
 #else
     (void)json;
     (void)width;
     (void)allow_unverified;
+    (void)offset;
+    (void)length;
+    (void)has_length;
     fputs("cachescope: Linux is required. Run inside a Linux VM or the Docker image.\n", stderr);
     return 1;
 #endif

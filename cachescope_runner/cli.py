@@ -43,6 +43,20 @@ def percentage(value):
     return result
 
 
+def interval_arg(value):
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("interval must be a finite positive number of seconds")
+    return result
+
+
+def width_arg(value):
+    result = positive(value)
+    if result > 4096:
+        raise argparse.ArgumentTypeError("width must be between 1 and 4096")
+    return result
+
+
 def save_json(path, data):
     path = Path(path)
     temporary = path.with_name(path.name + ".tmp")
@@ -74,9 +88,13 @@ def binary_path(value=None):
     return candidate
 
 
-def inspect(binary, path, width=64):
-    result = subprocess.run([binary, "inspect", "--json", "--width", str(width),
-                             "--", str(path)], text=True, capture_output=True, check=False)
+def inspect(binary, path, width=64, *, offset=0, length=None):
+    command = [binary, "inspect", "--json", "--width", str(width)]
+    if offset:
+        command.extend(["--offset", str(offset)])
+    if length is not None:
+        command.extend(["--length", str(length)])
+    result = subprocess.run([*command, "--", str(path)], text=True, capture_output=True, check=False)
     if result.returncode:
         raise ExperimentError(result.stderr.strip() or "inspector failed")
     data = json.loads(result.stdout)
@@ -408,6 +426,23 @@ def benchmark(args):
 def parser():
     root = argparse.ArgumentParser(description="CacheScope Linux experiment runner")
     commands = root.add_subparsers(dest="command", required=True)
+    live = commands.add_parser("watch", help="live residency map with changes between samples")
+    live.add_argument("file", type=Path)
+    live.add_argument("--cachescope", help="path to the C inspector")
+    live.add_argument("--interval", type=interval_arg, default=1.0, help="seconds between sample starts")
+    live.add_argument("--count", type=positive, help="stop after this many samples; default: until Ctrl-C")
+    live.add_argument("--width", type=width_arg, default=64)
+    live.add_argument("--offset", type=size_arg, default=0, help="page-aligned file offset")
+    live.add_argument("--length", type=size_arg, help="positive range length; default: through EOF")
+    live.add_argument("--save", type=Path, help="save every snapshot and timeline.jsonl in a new directory")
+    live.add_argument("--jsonl", action="store_true", help="one JSON event per sample on stdout")
+    live.add_argument("--plain", action="store_true", help="append plain frames without terminal escapes")
+    live.add_argument("--no-color", action="store_true", help="disable map colors (also respects NO_COLOR)")
+    diff = commands.add_parser("diff", help="compare two saved inspector snapshots (also works on macOS)")
+    diff.add_argument("before", type=Path)
+    diff.add_argument("after", type=Path)
+    diff.add_argument("--json", action="store_true", help="emit all changed bins as JSON")
+    diff.add_argument("--limit", type=positive, default=8, help="largest changed regions to display")
     prep = commands.add_parser("prepare", help="write independent sample.bin and control.bin")
     prep.add_argument("directory", type=Path)
     prep.add_argument("--size", type=size_arg, default=256 * 1024**2)
@@ -437,11 +472,17 @@ def parser():
 def main(argv=None):
     root = parser()
     args = root.parse_args(argv)
-    if sys.platform != "linux":
+    if sys.platform != "linux" and args.command != "diff":
         print("cachescope runner: Linux required; use a Linux VM or Docker image", file=sys.stderr)
         return 1
     try:
-        if args.command == "prepare":
+        if args.command == "diff":
+            from .snapshots import diff_command
+            return diff_command(args)
+        elif args.command == "watch":
+            from .snapshots import watch
+            return watch(args)
+        elif args.command == "prepare":
             prepare(args.directory, args.size)
         elif args.command == "read-range":
             print(json.dumps(read_range(args.file, args.offset, args.length)))
@@ -457,5 +498,5 @@ def main(argv=None):
         print(f"cachescope runner: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("cachescope runner: interrupted; completed trials remain in the output directory", file=sys.stderr)
+        print("cachescope runner: interrupted; any saved results remain on disk", file=sys.stderr)
         return 130

@@ -7,6 +7,9 @@ dependency-free Python experiment runner, and a reproducible Docker / Kubernetes
 demo. The inspector maps a file without reading its contents. The experiment runner
 connects residency snapshots with fio measurements.
 
+Version 1.1 adds a live terminal view, zooming into file ranges, and saved-snapshot
+comparisons that show which regions warmed or cooled.
+
 The main experiment asks: **if pod A reads half a file, can pod B observe which half?**
 The demo compares a shared file with an independently written, byte-identical file
 on a separate inode. It saves evidence for both cases.
@@ -61,6 +64,85 @@ The CLI accepts `--json`, `--width 1..4096`, and `--` before a filename starting
 `-`. It handles empty files, partial final pages, and missing paths. Nonregular files
 (including directories and FIFOs) are rejected. `make install` installs the C binary;
 run the Python module from this repository.
+
+## Live view, zoom, and snapshot comparison
+
+Watch the cache map change as another process reads a file. In terminal B:
+
+```sh
+python3 -m cachescope_runner evict data/sample.bin
+python3 -m cachescope_runner watch data/sample.bin \
+  --interval 0.5 --count 20 --save results/live
+```
+
+In terminal A, while the monitor is running:
+
+```sh
+python3 -m cachescope_runner read-range data/sample.bin --length 128MiB
+```
+
+`watch` refreshes a colored map in an interactive terminal, displays warmer/cooler
+bins and net page changes since the previous sample, and saves snapshots for replay.
+Omit `--count` to run until Ctrl-C. Use `--jsonl` for one JSON event per sample,
+`--plain` for append-only terminal output, or `--no-color` / `NO_COLOR` to disable
+colors. Redirected output contains no terminal escapes. Monitoring itself does
+not read the file contents. Saved snapshots consume disk space until you stop it.
+If file identity, size, or layout changes between samples, the monitor explicitly
+starts a new comparison baseline.
+
+Zoom into a region without inspecting the whole file:
+
+```sh
+./cachescope inspect data/sample.bin --offset 64MiB --length 32MiB --width 32
+python3 -m cachescope_runner watch data/sample.bin --offset 64MiB --length 32MiB
+```
+
+Offsets must align to the system page size. Lengths can end inside a page, must
+be positive, and must stay within the file. Omit length to inspect through EOF.
+Reported bins retain **absolute file offsets**; residency counts describe the
+selected range. Full-file inspection works as before.
+
+After the 20-sample monitor finishes, compare its first and last snapshots:
+
+```sh
+python3 -m cachescope_runner diff \
+  results/live/snapshot-000001.json results/live/snapshot-000020.json
+
+# Or capture two snapshots manually with identical width/range settings.
+./cachescope inspect --json data/sample.bin > before.json
+# Read a region from another terminal, then:
+./cachescope inspect --json data/sample.bin > after.json
+python3 -m cachescope_runner diff before.json after.json --json
+```
+
+The diff map uses `+` for a bin with more resident pages, `-` for fewer, and `.` for
+the same net count. It lists the largest changed regions; `--json` includes them
+all. A region can warm while another cools even when the file's total percentage
+is unchanged. These are **net per-bin changes**; turnover among pages within a bin
+can be hidden. Comparisons reject unverified data, inconsistent counts, different
+file identities, and mismatched layouts. Capture on the same node / filesystem
+context: device and inode numbers are not universal identities across machines.
+Offline `diff` also works on macOS and accepts original version-1 full-file snapshots.
+
+The Docker image exposes these commands directly:
+
+```sh
+docker run --rm -it -v cachescope-data:/data cachescope:local \
+  watch /data/sample.bin --interval 0.5 --count 20 --save /data/live
+docker run --rm -v cachescope-data:/data:ro cachescope:local \
+  diff /data/live/snapshot-000001.json /data/live/snapshot-000020.json
+```
+
+Initialize the named volume using the Docker instructions below first. For the
+two-pod demo, observe reader A live with:
+
+```sh
+kubectl --context kind-cachescope -n cachescope exec -it observer-b -- \
+  python3 -m cachescope_runner watch /data/sample.bin --interval 0.5
+```
+
+The pods' read-only mounts support monitoring; save output on the client or omit
+`--save` in the pod.
 
 ## Verify the spatial measurement
 
@@ -164,7 +246,7 @@ docker rm cachescope-export
 
 Default container UID:GID is `1000:1000`. Override it for an existing file. The image
 routes `inspect` to C and `prepare`, `evict`, `read-range`, `validate`, and `benchmark`
-to Python. Other arguments execute a command directly.
+to Python, along with `watch` and `diff`. Other arguments execute a command directly.
 
 Docker Desktop runs Linux in a VM. A Mac bind mount crosses an additional filesystem
 boundary, so native Linux storage gives a clearer page-cache experiment. See

@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,76 @@ class InspectorTests(unittest.TestCase):
             path = Path(self.directory.name) / os.fsdecode(raw)
             path.write_bytes(b"x")
             self.assertEqual(self.snapshot(path)["file"], str(path))
+
+    def test_zoom_uses_absolute_offsets_and_counts_partial_final_page(self):
+        self.path.write_bytes(b"x" * (self.page * 5 + 1))
+        result = self.command("inspect", "--json", "--offset", self.page * 2,
+                              "--length", self.page + 1, self.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["size_bytes"], self.page * 5 + 1)
+        self.assertEqual(data["offset_bytes"], self.page * 2)
+        self.assertEqual(data["length_bytes"], self.page + 1)
+        self.assertEqual(data["total_pages"], 2)
+        self.assertEqual([b["start_page"] for b in data["bins"]], [2, 3])
+        self.assertEqual([b["length_bytes"] for b in data["bins"]], [self.page, 1])
+        self.assertEqual([b["offset_bytes"] for b in data["bins"]], [self.page * 2, self.page * 3])
+        from cachescope_runner.snapshots import validate_snapshot
+        validate_snapshot(data)
+
+    def test_zoom_boundaries_units_and_invalid_ranges(self):
+        self.path.write_bytes(b"x" * (2 * 1024**2))
+        result = self.command("inspect", "--json", "--offset", "1MiB", "--length", "1KiB", self.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["length_bytes"], 1024)
+        for flag, value in (("--length", "0"), ("--length", "1MB"), ("--offset", "-1"),
+                            ("--offset", "18446744073709551616"), ("--length", "18446744073709551615GiB")):
+            self.assertEqual(self.command("inspect", flag, value, self.path).returncode, 2)
+        for flags in (("--offset", "1"), ("--offset", "3MiB"),
+                      ("--offset", "1MiB", "--length", "2MiB")):
+            self.assertEqual(self.command("inspect", *flags, self.path).returncode, 1)
+        result = self.command("inspect", "--json", "--offset", "2MiB", self.path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["total_pages"], 0)
+        self.assertEqual(self.command("inspect", "--help").returncode, 0)
+
+    def test_live_monitor_observes_a_reader_and_saves_a_valid_diff(self):
+        from cachescope_runner.snapshots import compare_snapshots
+        size = 32 * 1024**2
+        with self.path.open("wb") as stream:
+            for _ in range(32):
+                stream.write(os.urandom(1024**2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _, _, cold = cold_baseline(BIN, self.path, 1, 3)
+        if not cold:
+            self.skipTest("filesystem did not honor advisory eviction")
+        saved = Path(self.directory.name) / "live"
+        process = subprocess.Popen([sys.executable, "-m", "cachescope_runner", "watch", str(self.path),
+                                    "--cachescope", BIN, "--jsonl", "--count", "2", "--interval", "1",
+                                    "--save", str(saved)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 10)[0], "monitor did not emit baseline")
+            first_line = process.stdout.readline()
+            self.assertTrue(first_line, "monitor exited before its baseline")
+            before = json.loads(first_line)["snapshot"]
+            self.assertLessEqual(before["resident_percent"], 1)
+            read_range(self.path, 0, size // 2)
+            rest, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, error)
+            event = json.loads(rest)
+            self.assertGreater(event["net_resident_pages"], 0)
+            self.assertGreaterEqual(region_percent(event["snapshot"], 0, size // 2), 90)
+            left, right = [json.loads(p.read_text()) for p in sorted(saved.glob("snapshot-*.json"))]
+            diff = compare_snapshots(left, right)
+            self.assertIn("+", diff["delta_map"][:32])
+            zoom = self.command("inspect", "--json", "--offset", "8MiB", "--length", "8MiB", self.path)
+            self.assertEqual(zoom.returncode, 0, zoom.stderr)
+            self.assertGreaterEqual(json.loads(zoom.stdout)["resident_percent"], 90)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
 
     def test_ownership_masking_is_not_silently_reported(self):
         if os.geteuid() != 0:

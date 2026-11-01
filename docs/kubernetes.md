@@ -43,6 +43,21 @@ Exit 0 means both observations met the criteria, 2 means inconclusive, 1 an erro
 
 After setup, use these in separate terminals, or sequentially:
 
+For a refreshing observer view, run this in terminal B while terminal A executes
+the eviction and read commands below. Stop the monitor with Ctrl-C. Use `--plain`
+for append-only output, or `--jsonl --count 20` to capture a bounded stream on the
+client. The observer mount is read-only, so recordings should be redirected to
+the client rather than saved inside `/data`.
+
+```sh
+kubectl --context kind-cachescope -n cachescope exec -it observer-b -- \
+  python3 -m cachescope_runner watch /data/sample.bin --interval 0.5
+
+# Capture on the client without a TTY:
+kubectl --context kind-cachescope -n cachescope exec observer-b -- \
+  python3 -m cachescope_runner watch /data/sample.bin --jsonl --count 20 > observer.jsonl
+```
+
 ```sh
 # Reset and inspect the shared file.
 kubectl --context kind-cachescope -n cachescope exec reader-a -- \

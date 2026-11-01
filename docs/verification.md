@@ -80,3 +80,27 @@ the evidence. The default kubeconfig was not changed; validation used a separate
 temporary kubeconfig. Docker images `cachescope:local` and `cachescope:test` remain
 available. Recreate the demo using `scripts/setup-kind.sh`; see the README for all
 commands.
+
+## Version 1.1 feature verification
+
+The live monitor, range inspection, and offline diff were subsequently exercised
+on the same Linux VM. All **18 Python unit tests and 8 Linux integration tests**
+passed with no skips, together with the C map checks. A separate reader process
+warmed a file while the monitor was running; its saved samples were compared to
+verify that the live event and replayed diff agreed. macOS unit tests also passed,
+including offline diff without Linux.
+
+The production Docker image was tested with a 256 MiB file:
+
+- The baseline monitor snapshot was 0% resident.
+- A buffered read requested offsets 64–96 MiB.
+- The diff found 8,448 net additional resident pages across nine bins. Eight bins
+  covered the requested 32 MiB; the ninth was partially resident beyond the range.
+- Zooming into 64–96 MiB reported 8,192 / 8,192 resident pages, with absolute offsets.
+- Both existing first-half/middle-half spatial checks still passed.
+- All three fio trial types qualified in a one-repetition regression run.
+
+Raw recordings, diff JSON, zoom JSON, spatial validation, and fio outputs are
+retained locally in `results/feature-verification/`. The new recording files are
+compatible with the offline diff command. Snapshot comparisons also accept the
+original full-file schema without range fields. Results remain gitignored.
